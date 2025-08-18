@@ -1,5 +1,5 @@
 # api_ner
-Implmentación de una API quen detecta entidades en español con spaCy
+Implmentación de una API que detecta entidades en español con spaCy
 
 Despliegue:
 
