@@ -1,53 +1,70 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+from pathlib import Path
 import os
-from pdf_handler import get_ocr
-from ocr_quality_check import compute_document
+import tempfile
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
+
+from text_quality_check import compute_document
+from text_extractor import extract_text
+
 
 app = FastAPI()
-
-# Directorio donde se almacenarán temporalmente los archivos
 UPLOAD_DIR = "./uploads"
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Ruta GET para recibir el archivo y procesarlo
+
 @app.post("/process-file/")
 async def process_file(file: UploadFile = File(...)):
+    file_path = None
     try:
-        # Guardar el archivo en el sistema temporalmente
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(status_code=415, detail="Solo se aceptan archivos PDF, TXT o MD")
+        with tempfile.NamedTemporaryFile(dir=UPLOAD_DIR, suffix=suffix, delete=False) as temporary:
+            file_path = temporary.name
+            size = 0
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="El archivo supera el límite permitido")
+                temporary.write(chunk)
 
-        # Aquí debes insertar el código de procesamiento del archivo
-        # Supongamos que ya tienes una función llamada `process_document`
-        # que toma el archivo y regresa los resultados en JSON
-        result = process_document(file_path)
+        result = process_document(file_path, file.filename or "archivo")
+        status_code = 422 if result["status"] == "no_text_extracted" else 200
+        return JSONResponse(status_code=status_code, content=result)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if file_path:
+            try:
+                os.remove(file_path)
+            except FileNotFoundError:
+                pass
 
-        # Eliminar el archivo temporal después del procesamiento
-        os.remove(file_path)
 
-        # Regresar el resultado del procesamiento como un JSON
-        return JSONResponse(content=result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def process_document(file_path, original_filename=None):
+    text = extract_text(file_path)
+    filename = original_filename or Path(file_path).name
+    if not text.strip():
+        return {
+            "filename": filename,
+            "status": "no_text_extracted",
+            "details": "No se pudo extraer texto del archivo",
+        }
 
-# Función que procesa el archivo y regresa un JSON
-# Aquí deberías implementar tu lógica de procesamiento
-def process_document(file_path):
-    # Supongamos que este es el proceso que ya tienes
-    # Esta función debe retornar un diccionario o lista que será convertido a JSON
-    
-    text = get_ocr(file_path)
     clean_txt, legible_ratio_es, non_alpha_ratio, num_tokens, detected_entities = compute_document(text)
     return {
-        "filename": os.path.basename(file_path),
+        "filename": filename,
         "legible_ratio_es": legible_ratio_es,
-        "non_alpha_ratio": non_alpha_ratio, 
+        "non_alpha_ratio": non_alpha_ratio,
         "num_tokens": num_tokens,
-        "clean_txt,": clean_txt,
+        "clean_txt": clean_txt,
         "detected_entities": detected_entities,
-        "status": "Processed",
-        "details": "Archivo procesado exitosamente"
+        "status": "processed",
+        "details": "Archivo procesado exitosamente",
     }
-
